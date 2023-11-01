@@ -1,118 +1,299 @@
 import Image from 'next/image'
 import { Inter } from 'next/font/google'
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import useLit from "../../hooks/useLit";
+import { nanoid } from "nanoid";
+import { useAsset, useCreateAsset } from "@livepeer/react";
+import Link from "next/link";
+import { useAccount } from "wagmi";
+import LitJsSdk from "lit-js-sdk";
+import LitShareModal from "lit-share-modal-v3";
+
+
+const resourceId = {
+  baseUrl: "my-awesome-app.vercel.app",
+  path: `/asset/${nanoid()}`,
+  orgId: "some-app",
+  role: "",
+  extraData: `createdAt=${Date.now()}`,
+};
+
+// Inputs
+const [file, setFile] = useState(undefined);
+const fileInputRef = useRef(null);
+
+// Lit
+const [showShareModal, setShowShareModal] = useState(false);
+const [savedSigningConditionsId, setSavedSigningConditionsId] = useState();
+const [authSig, setAuthSig] = useState({});
+const { litNodeClient, litConnected } = useLit();
+
+const [litGateParams, setLitGateParams] = useState({
+  unifiedAccessControlConditions: null,
+  permanent: false,
+  chains: [],
+  authSigTypes: [],
+});
+
+// Misc
+const { address: publicKey } = useAccount();
+
+// Step 1: pre-sign the auth message
+useEffect(() => {
+  if (publicKey) {
+    Promise.resolve().then(async () => {
+      try {
+        setAuthSig({
+          ethereum: await LitJsSdk.checkAndSignAuthMessage({
+            chain: "ethereum",
+            switchChain: false,
+          }),
+        });
+      } catch (err: any) {
+        alert(`Error signing auth message: ${err?.message || err}`);
+      }
+    });
+  }
+}, [publicKey]);
+
+// Step 2: Creating an asset
+const {
+  mutate: createAsset,
+  data: createdAsset,
+  status: createStatus,
+  progress,
+} = useCreateAsset(
+  file
+    ? {
+        sources: [
+          {
+            file: file,
+            name: file.name,
+            playbackPolicy: {
+              type: "webhook",
+              webhookId: "WEBHOOK_ID",
+              webhookContext: {
+                accessControl: litGateParams.unifiedAccessControlConditions,
+                resourceId: resourceId,
+              },
+            },
+          },
+        ] as const,
+      }
+    : null,
+);
+
+// Step 3: Getting asset and refreshing for the status
+const {
+  data: asset,
+  error,
+  status: assetStatus,
+} = useAsset({
+  assetId: createdAsset?.[0].id,
+  refetchInterval: (asset) =>
+    asset?.storage?.status?.phase !== "ready" ? 5000 : false,
+});
+
+const progressFormatted = useMemo(
+  () =>
+    progress?.[0].phase === "failed" || createStatus === "error"
+      ? "Failed to upload video."
+      : progress?.[0].phase === "waiting"
+      ? "Waiting"
+      : progress?.[0].phase === "uploading"
+      ? `Uploading: ${Math.round(progress?.[0]?.progress * 100)}%`
+      : progress?.[0].phase === "processing"
+      ? `Processing: ${Math.round(progress?.[0].progress * 100)}%`
+      : null,
+  [progress, createStatus],
+);
+
+const isLoading = useMemo(
+  () =>
+    createStatus === "loading" ||
+    assetStatus === "loading" ||
+    (asset && asset?.status?.phase !== "ready") ||
+    (asset?.storage && asset?.storage?.status?.phase !== "ready"),
+  [asset, assetStatus, createStatus],
+);
+
+// Step 4: After an asset is created, save the signing condition
+useEffect(() => {
+  if (
+    createStatus === "success" &&
+    asset?.id &&
+    asset?.id !== savedSigningConditionsId
+  ) {
+    setSavedSigningConditionsId(asset?.id);
+    // @ts-ignore
+    const ACConditions = asset?.playbackPolicy.webhookContext.accessControl;
+    console.log(ACConditions, resourceId);
+    Promise.resolve().then(async () => {
+      try {
+        await litNodeClient.saveSigningCondition({
+          unifiedAccessControlConditions: ACConditions,
+          authSig,
+          resourceId: resourceId,
+        });
+      } catch (err: any) {
+        alert(`Error saving signing condition: ${err?.message || err}`);
+      }
+    });
+  }
+}, [litNodeClient, createStatus, savedSigningConditionsId, authSig, asset]);
+
+const handleClick = async () => {
+  if (!publicKey) {
+    console.log("Please connect your wallet to continue");
+    return;
+  }
+
+  if (!file) {
+    console.log("Please choose a file");
+    return;
+  }
+  if (!litGateParams.unifiedAccessControlConditions) {
+    console.log("Please choose the access control conditions");
+    return;
+  }
+  createAsset?.();
+};
+
+
 
 const inter = Inter({ subsets: ['latin'] })
 
 export default function Home() {
   return (
-    <main
-      className={`flex min-h-screen flex-col items-center justify-between p-24 ${inter.className}`}
-    >
-      <div className="z-10 max-w-5xl w-full items-center justify-between font-mono text-sm lg:flex">
-        <p className="fixed left-0 top-0 flex w-full justify-center border-b border-gray-300 bg-gradient-to-b from-zinc-200 pb-6 pt-8 backdrop-blur-2xl dark:border-neutral-800 dark:bg-zinc-800/30 dark:from-inherit lg:static lg:w-auto  lg:rounded-xl lg:border lg:bg-gray-200 lg:p-4 lg:dark:bg-zinc-800/30">
-          Get started by editing&nbsp;
-          <code className="font-mono font-bold">pages/index.tsx</code>
-        </p>
-        <div className="fixed bottom-0 left-0 flex h-48 w-full items-end justify-center bg-gradient-to-t from-white via-white dark:from-black dark:via-black lg:static lg:h-auto lg:w-auto lg:bg-none">
-          <a
-            className="pointer-events-none flex place-items-center gap-2 p-8 lg:pointer-events-auto lg:p-0"
-            href="https://vercel.com?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            By{' '}
-            <Image
-              src="/vercel.svg"
-              alt="Vercel Logo"
-              className="dark:invert"
-              width={100}
-              height={24}
-              priority
-            />
-          </a>
+    <section className="p-10 h-screen flex flex-col lg:flex-row-reverse">
+      <div className="w-full h-1/2 lg:h-full lg:w-1/2 ">
+        <div className="relative">
+          <img
+            src="<https://solana-nft.withlivepeer.com/_next/image?url=%2Fhero.png&w=2048&q=75>"
+            alt="BannerImage"
+            className=" h-[90vh] w-full lg:object-cover lg:block hidden rounded-xl"
+          />
         </div>
       </div>
-
-      <div className="relative flex place-items-center before:absolute before:h-[300px] before:w-[480px] before:-translate-x-1/2 before:rounded-full before:bg-gradient-radial before:from-white before:to-transparent before:blur-2xl before:content-[''] after:absolute after:-z-20 after:h-[180px] after:w-[240px] after:translate-x-1/3 after:bg-gradient-conic after:from-sky-200 after:via-blue-200 after:blur-2xl after:content-[''] before:dark:bg-gradient-to-br before:dark:from-transparent before:dark:to-blue-700/10 after:dark:from-sky-900 after:dark:via-[#0141ff]/40 before:lg:h-[360px]">
-        <Image
-          className="relative dark:drop-shadow-[0_0_0.3rem_#ffffff70] dark:invert"
-          src="/next.svg"
-          alt="Next.js Logo"
-          width={180}
-          height={37}
-          priority
-        />
+      <div className="lg:w-1/2  w-full h-full lg:mr-20">
+        <p className="text-base font-light text-primary lg:mt-20 mt-5">
+          Livepeer x Ethereum x Lit
+        </p>
+        <h1 className="text-5xl font-bold font-MontHeavy text-gray-100 mt-6 leading-tight">
+          Token gate your videos on Ethereum with Livepeer.
+        </h1>
+        <p className="text-base font-light text-zinc-500 mt-2">
+          Token gating is a powerful tool for content creators who want to
+          monetize their video content. With Livepeer, you can easily create a
+          gated video that requires users to hold a certain amount of tokens/NFT
+          in order to access the content. <br /> <br /> Livepeer&apos;s token
+          gating feature is easy to use and highly customizable
+        </p>
+        <div className="flex flex-col mt-6">
+          <div className="h-4" />
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full border-dashed border-zinc-800 border rounded-md text-zinc-700  p-4 flex items-center justify-center hover:border-zinc-700 "
+          >
+            <p className="">
+              {file ? (
+                file.name +
+                " - " +
+                Number(file.size / 1024 / 1024).toFixed() +
+                " MB"
+              ) : (
+                <>Choose a video file to upload</>
+              )}
+            </p>
+          </div>
+          <div className="h-5" />
+          <div onClick={() => setShowShareModal(true)}>
+            <input
+              className={
+                " bg-transparent p-4  border-zinc-800 border rounded-md text-zinc-400 text-sm font-light w-full  placeholder:text-zinc-700 focus:outline-none"
+              }
+              placeholder={"Choose the access control conditions"}
+              disabled
+              value={
+                !litGateParams.unifiedAccessControlConditions
+                  ? ""
+                  : JSON.stringify(
+                      litGateParams.unifiedAccessControlConditions,
+                      null,
+                      2
+                    )
+              }
+            />
+          </div>
+  
+          <input
+            onChange={(e) => {
+              if (e.target.files) {
+                setFile(e.target.files[0]);
+              }
+            }}
+            type="file"
+            accept="video/*"
+            ref={fileInputRef}
+            hidden
+          />
+        </div>
+        <div className="flex flex-row items-center mb-20 lg:mb-0">
+          <button
+            onClick={handleClick}
+            className={
+              "rounded-xl  text-sm font-medium p-3 mt-6  w-36 hover:cursor-pointer bg-primary"
+            }
+          >
+            {isLoading ? progressFormatted || "Uploading..." : "Upload"}
+          </button>
+  
+          {asset?.status?.phase === "ready" && (
+            <div>
+              <div className="flex flex-col justify-center items-center ml-5 font-matter">
+                <p className="mt-6 text-white">
+                  Your token-gated video is uploaded, and you can view it{" "}
+                  <Link
+                    className="text-primary"
+                    target={"_blank"}
+                    rel={"noreferrer"}
+                    href={`/watch/${asset?.playbackId}`}
+                  >
+                    here
+                  </Link>
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+  
+        {showShareModal && (
+          <div className="fixed top-0 left-0 w-full h-full z-50 bg-black bg-opacity-50 flex items-center justify-center">
+            <div className="w-1/3 h-[95%] mt-10">
+              <LitShareModal
+                onClose={() => {
+                  setShowShareModal(false);
+                }}
+                chainsAllowed={["ethereum"]}
+                injectInitialState={true}
+                defaultChain={"ethereum"}
+                initialUnifiedAccessControlConditions={
+                  litGateParams?.unifiedAccessControlConditions
+                }
+                onUnifiedAccessControlConditionsSelected={(
+                  val: LitGateParams
+                ) => {
+                  setLitGateParams(val);
+                  setShowShareModal(false);
+                }}
+                darkMode={true}
+                injectCSS={false}
+              />
+            </div>
+          </div>
+        )}
       </div>
-
-      <div className="mb-32 grid text-center lg:max-w-5xl lg:w-full lg:mb-0 lg:grid-cols-4 lg:text-left">
-        <a
-          href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Docs{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Find in-depth information about Next.js features and API.
-          </p>
-        </a>
-
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Learn{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Learn about Next.js in an interactive course with&nbsp;quizzes!
-          </p>
-        </a>
-
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Templates{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Discover and deploy boilerplate example Next.js&nbsp;projects.
-          </p>
-        </a>
-
-        <a
-          href="https://vercel.com/new?utm_source=create-next-app&utm_medium=default-template-tw&utm_campaign=create-next-app"
-          className="group rounded-lg border border-transparent px-5 py-4 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:dark:border-neutral-700 hover:dark:bg-neutral-800/30"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2 className={`mb-3 text-2xl font-semibold`}>
-            Deploy{' '}
-            <span className="inline-block transition-transform group-hover:translate-x-1 motion-reduce:transform-none">
-              -&gt;
-            </span>
-          </h2>
-          <p className={`m-0 max-w-[30ch] text-sm opacity-50`}>
-            Instantly deploy your Next.js site to a shareable URL with Vercel.
-          </p>
-        </a>
-      </div>
-    </main>
-  )
+    </section>
+  );
+  
 }
